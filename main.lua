@@ -1,183 +1,221 @@
--- ====================================================================
--- HỆ THỐNG LIÊN KẾT SERVER KEY PASTEBIN TRỰC TUYẾN
--- ====================================================================
+#include "imgui.h"
+#include <vector>
+#include <string>
+#include <string.h>
 
--- 🔴 HÃY THAY LINK RAW PASTEBIN CỦA BẠN VÀO DƯỚI ĐÂY 🔴
-local ServerKeyLink = "https://pastebin.com" 
+// ========================================================
+// 1. CẤU TRÚC DỮ LIỆU ĐỐI TƯỢNG (GAME ENGINE STRUCTURE)
+// ========================================================
+struct Vector2D {
+    float x;
+    float y;
+};
 
--- Gửi yêu cầu lên hệ thống để tải Key mới nhất về bộ nhớ đệm
-local successFetch, ServerKey = pcall(function()
-    return game:HttpGet(ServerKeyLink)
-end)
+struct GamePlayer {
+    int id;
+    std::string name;
+    Vector2D position;
+    float width;
+    float height;
+    bool isAlive;
+};
 
--- Xử lý chuỗi dữ liệu (Xóa khoảng trắng/xuống dòng thừa từ Server)
-if successFetch and ServerKey then
-    ServerKey = string.gsub(ServerKey, "%s+", "")
-else
-    ServerKey = "MÁY_CHỦ_BẢO_TRÌ" -- Chặn đăng nhập nếu link Pastebin bị xóa hoặc lỗi mạng
-end
+// ========================================================
+// 2. KHAI BÁO CÁC BIẾN TRẠNG THÁI HỆ THỐNG (STATES)
+// ========================================================
+// Quản lý bảo mật & Menu
+static bool b_MenuOpen = true;
+static bool b_Authenticated = false;
+static char sz_KeyBuffer[64] = "";
+const char* sz_ValidKey = "ADMIN-DEV-2026"; // Mã khóa kích hoạt mẫu
 
--- Khởi chạy giao diện cổng xác thực Key trực tuyến
-local Library = loadstring(game:HttpGet("https://githubusercontent.com"))()
-local KeyWindow = Library.CreateLib("🌐 XÁC THỰC SERVER KEY ONLINE 🌐", "Midnight")
-local KeyTab = KeyWindow:NewTab("Cổng Vào")
-local KeySec = KeyTab:NewSection("Kết Nối Dữ Liệu Trực Tuyến")
+// Quản lý Phân Tab Giao diện
+enum MenuTabs { TAB_OVERVIEW = 0, TAB_VISUALS, TAB_MOVEMENT };
+static int i_SelectedTab = TAB_OVERVIEW;
 
-KeySec:NewTextBox("Nhập Key Hiện Tại:", "Dán mã Key lấy từ máy chủ vào đây", function(text)
-    local userInput = string.gsub(text, "%s+", "") -- Xóa khoảng trắng người dùng nhập lỗi
-    
-    -- Đối chiếu trực tiếp mã nhập vào với mã tải từ Pastebin về
-    if userInput == ServerKey and ServerKey ~= "MÁY_CHỦ_BẢO_TRÌ" then
-        game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title = "Thành Công!",
-            Text = "Key chính xác! Đang kết nối vào Menu...",
-            Duration = 3
-        })
+// Cấu hình tính năng
+static bool b_EnableESP = false;
+static int i_TargetPlayerIndex = 0;
+
+// ========================================================
+// 3. DỮ LIỆU GIẢ LẬP VÀ LOGIC XỬ LÝ TRONG GAME
+// ========================================================
+// Giả định đây là đối tượng Nhân vật chính (Local Player) của bạn
+static GamePlayer localPlayer = { 1, "Chủ Phòng (Dev)", {400.0f, 500.0f}, 40.0f, 60.0f, true };
+
+// Hàm lấy danh sách tất cả người chơi khác từ Server/Engine về bộ nhớ tạm
+std::vector<GamePlayer> FetchActivePlayers() 
+{
+    std::vector<GamePlayer> plist;
+    // Thêm dữ liệu mẫu của các người chơi khác trong phòng để test
+    plist.push_back({ 101, "Người chơi 1", {250.0f, 300.0f}, 40.0f, 60.0f, true });
+    plist.push_back({ 102, "Người chơi 2", {650.0f, 450.0f}, 40.0f, 60.0f, true });
+    plist.push_back({ 103, "Người chơi 3 (Đã chết)", {0.0f, 0.0f}, 40.0f, 60.0f, false });
+    return plist;
+}
+
+// Hàm thực hiện chức năng Dịch Chuyển Tức Thời an toàn (Chống văng/Kẹt vật lý)
+void ExecuteTeleport(GamePlayer& source, const GamePlayer& target) 
+{
+    // CHỐNG VĂNG: Kiểm tra xem mục tiêu có tồn tại hợp lệ và còn sống không
+    if (!target.isAlive) return;
+
+    // Thay đổi tọa độ nhân vật chính tới vị trí mục tiêu
+    // Trừ đi một khoảng nhỏ ở trục Y (-10px) để nhân vật xuất hiện phía trên đầu, tránh kẹt va chạm (Collision)
+    source.position.x = target.position.x;
+    source.position.y = target.position.y - 10.0f;
+}
+
+// Hàm vẽ khung định vị ESP đè lên màn hình đồ họa
+void RenderESPOverlay() 
+{
+    if (!b_EnableESP) return;
+
+    // Lấy danh sách vẽ lớp trên cùng của ImGui
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+    if (!drawList) return;
+
+    std::vector<GamePlayer> players = FetchActivePlayers();ImU32 colorBox = IM_COL32(0, 255, 150, 255); // Màu xanh neon định vị
+
+    for (const auto& player : players) 
+    {
+        // TỐI ƯU/CHỐNG VĂNG: Chỉ vẽ những đối tượng hợp lệ và còn sống
+        if (!player.isAlive) continue;
+
+        // Tính toán tọa độ 4 góc của khung Box từ tâm vị trí chân
+        float t_Left = player.position.x - (player.width / 2);
+        float t_Top = player.position.y - player.height;
+        float t_Right = player.position.x + (player.width / 2);
+        float t_Bottom = player.position.y;
+
+        // Tiến hành vẽ Box ESP
+        drawList->AddRect(ImVec2(t_Left, t_Top), ImVec2(t_Right, t_Bottom), colorBox, 0.0f, 0, 1.5f);
+
+        // Hiển thị Tên người chơi phía trên khung chữ nhật
+        std::string label = player.name;
+        drawList->AddText(ImVec2(t_Left, t_Top - 15), IM_COL32(255, 255, 255, 255), label.c_str());
+    }
+}
+
+// ========================================================
+// 4. HÀM DỰNG GIAO DIỆN MENU CHÍNH
+// ========================================================
+void DrawEngineController() 
+{
+    if (!b_MenuOpen) return;
+
+    // Đặt kích thước cố định cho khung cửa sổ xác thực và tính năng
+    ImGui::SetNextWindowSize(ImVec2(550, 380), ImGuiCond_FirstUseEver);
+
+    // MÀN HÌNH 1: YÊU CẦU XÁC THỰC MÃ KHÓA (KEY SYSTEM)
+    if (!b_Authenticated) 
+    {
+        ImGui::Begin("Hệ Thống Kích Hoạt Quyền Dev", &b_MenuOpen, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Cảnh báo: Cần nhập mã bản quyền để truy cập các tính năng kiểm thử!");
+        ImGui::Separator(); ImGui::Spacing();
+
+        ImGui::Text("Mã kích hoạt (Key):");
+        ImGui::InputText("##KeyInput", sz_KeyBuffer, IM_ARRAYSIZE(sz_KeyBuffer), ImGuiInputTextFlags_Password);
+        ImGui::Spacing();
+
+        if (ImGui::Button("XÁC NHẬN KÍCH HOẠT", ImVec2(-1, 35))) 
+        {
+            if (strcmp(sz_KeyBuffer, sz_ValidKey) == 0) {
+                b_Authenticated = true; // Mở khóa menu
+            } else {
+                ImGui::OpenPopup("Mã Sai");
+            }
+        }
+
+        // Popup cảnh báo khi gõ sai key
+        if (ImGui::BeginPopupModal("Mã Sai", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Mã kích hoạt bạn nhập không chính xác. Vui lòng thử lại!");
+            if (ImGui::Button("Đóng", ImVec2(100, 0))) { ImGui::CloseCurrentPopup(); }
+            ImGui::EndPopup();
+        }
+        ImGui::End();
+        return; // Chặn không cho chạy xuống menu tính năng bên dưới
+    }
+
+    // MÀN HÌNH 2: GIAO DIỆN ĐIỀU KHIỂN CHỨC NĂNG CHÍNH (ĐÃ XÁC THỰC)
+    ImGui::Begin("Developer Control Panel v1.0", &b_MenuOpen, ImGuiWindowFlags_NoCollapse);// Chia bố cục 2 cột bằng Table của ImGui (Thay thế cho cấu hình Columns cũ giúp tối ưu luồng hiển thị)
+    if (ImGui::BeginTable("MenuLayoutTable", 2, ImGuiTableFlags_SizingFixedFit)) 
+    {
+        ImGui::TableSetupColumn("Sidebar", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+        ImGui::TableSetupColumn("Content", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableNextRow();
+
+        // ----------------------------------------------------
+        // CỘT TRÁI: DANH SÁCH TAB ĐIỀU HƯỚNG
+        // ----------------------------------------------------
+        ImGui::TableSetColumnIndex(0);
+        ImGui::Text("Chức Năng");
+        ImGui::Separator(); ImGui::Spacing();
+
+        if (ImGui::Button("Tổng Quan", ImVec2(-1, 32)))  { i_SelectedTab = TAB_OVERVIEW; } ImGui::Spacing();
+        if (ImGui::Button("Định Vị ESP", ImVec2(-1, 32))) { i_SelectedTab = TAB_VISUALS; } ImGui::Spacing();
+        if (ImGui::Button("Dịch Chuyển", ImVec2(-1, 32))) { i_SelectedTab = TAB_MOVEMENT; }
+
+        // ----------------------------------------------------
+        // CỘT PHẢI: NỘI DUNG CHI TIẾT CỦA TỪNG TAB
+        // ----------------------------------------------------
+        ImGui::TableSetColumnIndex(1);
         
-        -- Xóa bảng nhập Key
-        pcall(function()
-            game:GetService("CoreGui"):FindFirstChild("🌐 XÁC THỰC SERVER KEY ONLINE 🔑" or "🌐 XÁC THỰC SERVER KEY ONLINE 🌐"):Destroy()
-        end)
-        
-        -- ====================================================================
-        -- TOÀN BỘ MENU TÍNH NĂNG 5-IN-1 CHỐNG LAG / CHỐNG VĂNG GAME
-        -- ====================================================================
-        local Window = Library.CreateLib("🔥 MENU VIP SIÊU CẤP ĐA GAME (ANTI-LAG) 🔥", "Midnight")
-        local currentPlaceId = game.PlaceId
+        if (i_SelectedTab == TAB_OVERVIEW) 
+        {
+            ImGui::Text("HỆ THỐNG KIỂM THỬ AN TOÀN TRÒ CHƠI");
+            ImGui::Separator();
+            ImGui::Text("Tài khoản: %s", localPlayer.name.c_str());
+            ImGui::Text("Tọa độ hiện tại: X: %.1f | Y: %.1f", localPlayer.position.x, localPlayer.position.y);
+            ImGui::Text("Hiệu năng hiển thị: %.1f FPS", ImGui::GetIO().Framerate);
+        }
+        else if (i_SelectedTab == TAB_VISUALS) 
+        {
+            ImGui::Text("CẤU HÌNH HIỂN THỊ ĐỒ HỌA (ESP)");
+            ImGui::Separator(); ImGui::Spacing();
+            
+            // Công tắc bật/tắt chức năng vẽ khung định vị
+            ImGui::Checkbox("Kích hoạt ESP Box", &b_EnableESP);
+            ImGui::TextWrapped("Lưu ý: Tính năng này vẽ trực tiếp lên DrawList tầng cao nhất, tự động bỏ qua các thực thể không còn hoạt động để tránh hao tổn tài nguyên CPU.");
+        }
+        else if (i_SelectedTab == TAB_MOVEMENT) 
+        {
+            ImGui::Text("ĐIỀU HƯỚNG DỊCH CHUYỂN NHÂN VẬT");
+            ImGui::Separator(); ImGui::Spacing();
 
-        local function createESP(object, name, color)
-            pcall(function()
-                if not object:FindFirstChild("VipHighlight") then
-                    local hl = Instance.new("Highlight")
-                    hl.Name = "VipHighlight"
-                    hl.FillColor = color
-                    hl.FillTransparency = 0.4
-                    hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-                    hl.OutlineTransparency = 0.1
-                    hl.Parent = object
+            // Lấy danh sách người chơi mới nhất
+            std::vector<GamePlayer> currentPlayers = FetchActivePlayers();
+            
+            // Xử lý giao diện danh sách cuộn (Combo Box) để chọn người chơi cần dịch chuyển tới
+            if (ImGui::BeginCombo("Mục tiêu đến", currentPlayers[i_TargetPlayerIndex].name.c_str())) 
+            {
+                for (int n = 0; n < currentPlayers.size(); n++) 
+                {bool isSelected = (i_TargetPlayerIndex == n);
+                    std::string entryName = currentPlayers[n].name + (currentPlayers[n].isAlive ? "" : " (Chết)");
                     
-                    local bbg = Instance.new("BillboardGui", object)bbg.Name = "VipLabel"
-                    bbg.AlwaysOnTop = true
-                    bbg.Size = UDim2.new(0, 100, 0, 30)
-                    bbg.StudsOffset = Vector3.new(0, 3, 0)
-                    
-                    local tl = Instance.new("TextLabel", bbg)
-                    tl.Size = UDim2.new(1, 0, 1, 0)
-                    tl.BackgroundTransparency = 1
-                    tl.Text = name
-                    tl.TextColor3 = color
-                    tl.TextSize = 14
-                    tl.TextStrokeTransparency = 0
-                end
-            end)
-        end
+                    if (ImGui::Selectable(entryName.c_str(), isSelected)) {
+                        i_TargetPlayerIndex = n;
+                    }
+                    if (isSelected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
 
-        local GeneralTab = Window:NewTab("Tiện Ích Chung")
-        local GenSec = GeneralTab:NewSection("Hỗ Trợ Di Chuyển & Tầm Nhìn")
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
-        GenSec:NewToggle("Bật/Tắt Chạy Nhanh (Speed 100)", "Bật tăng tốc tối đa, tắt về bình thường", function(state)
-            pcall(function()
-                local player = game.Players.LocalPlayer
-                if player.Character and player.Character:FindFirstChild("Humanoid") then
-                    player.Character.Humanoid.WalkSpeed = state and 100 or 16
-                end
-            end)
-        end)
+            // Nút bấm thực hiện hành động dịch chuyển tức thời
+            if (ImGui::Button("DỊCH CHUYỂN ĐẾN MỤC TIÊU", ImVec2(-1, 40))) 
+            {
+                ExecuteTeleport(localPlayer, currentPlayers[i_TargetPlayerIndex]);
+            }
+        }
 
-        GenSec:NewSlider("Tự Chỉnh Tốc Độ Chạy", "Kéo thanh để chỉnh vận tốc tùy ý", 150, 16, function(s)
-            pcall(function()
-                local player = game.Players.LocalPlayer
-                if player.Character and player.Character:FindFirstChild("Humanoid") then
-                    player.Character.Humanoid.WalkSpeed = s
-                end
-            end)
-        end)
+        ImGui::EndTable();
+    }
+    ImGui::End();
 
-        GenSec:NewSlider("Khoảng Cách Cam Xa", "Kéo xa góc nhìn để bao quát bản đồ", 500, 70, function(v)
-            game.Players.LocalPlayer.CameraMaxZoomDistance = v
-        end)
-
-        local TeleSec = GeneralTab:NewSection("Dịch Chuyển An Toàn")
-
-        local function getPlayerNames()
-            local names = {}
-            for _, p in pairs(game.Players:GetPlayers()) do
-                if p ~= game.Players.LocalPlayer then table.insert(names, p.Name) end
-            end
-            return names
-        end
-
-        local PlayerDropdown = TeleSec:NewDropdown("Chọn Người Chơi", "Chọn một người để dịch chuyển", getPlayerNames(), function(selectedPlayerName)
-            pcall(function()
-                local targetPlayer = game.Players:FindFirstChild(selectedPlayerName)
-                if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                    local localRoot = game.Players.LocalPlayer.Character and game.Players.LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-                    if localRoot then localRoot.CFrame = targetPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 3, 0) end
-                end
-            end)
-        end)
-
-        TeleSec:NewButton("🔄 Làm Mới Danh Sách", "Cập nhật lại danh sách", function()PlayerDropdown:Refresh(getPlayerNames())
-        end)
-
-        -- PHÂN PHỐI GAME THEO ID TRỰC TUYẾN
-        if currentPlaceId == 6516141723 or game.GameId == 2439162985 then 
-            local Tab = Window:NewTab("🚪 DOORS ADVANCED")
-            local Sec = Tab:NewSection("Phân Tích Thực Thể & Vật Phẩm")
-            _G.DoorsESP = false
-            Sec:NewToggle("Bật ESP Phân Loại", "Hiển thị thực thể và đồ quý giá", function(state)
-                _G.DoorsESP = state
-                task.spawn(function()
-                    while _G.DoorsESP do
-                        pcall(function()
-                            for _, obj in pairs(workspace:GetChildren()) do
-                                if obj.Name == "RushMoving" or obj.Name == "AmbushMoving" then createESP(obj, "⚠️ " .. obj.Name, Color3.fromRGB(255, 0, 0))
-                                elseif obj:FindFirstChild("Humanoid") and obj.Name == "Seek" then createESP(obj, "👁️ SEEK", Color3.fromRGB(139, 0, 0)) end
-                            end
-                            local currentRooms = workspace:FindFirstChild("CurrentRooms")
-                            if currentRooms then
-                                for _, room in pairs(currentRooms:GetChildren()) do
-                                    for _, asset in pairs(room:GetDescendants()) do
-                                        if asset.Name == "Key" then createESP(asset, "🔑 Chìa Khóa", Color3.fromRGB(255, 215, 0))
-                                        elseif asset.Name == "Gold" then createESP(asset, "💰 Vàng/Tiền", Color3.fromRGB(0, 255, 0))
-                                        elseif asset.Name == "Lighter" or asset.Name == "Flashlight" then createESP(asset, "🔦 Đồ Sáng", Color3.fromRGB(0, 255, 255)) end
-                                    end
-                                end
-                            end
-                        end)
-                        task.wait(2.5)
-                    end
-                end)
-            end)
-
-        elseif currentPlaceId == 116495829188952 or string.find(string.lower(game:GetService("MarketplaceService"):GetProductInfo(currentPlaceId).Name), "dead rails") then
-            local Tab = Window:NewTab("🚂 DEAD RAILS ADVANCED")
-            local Sec = Tab:NewSection("Quét Sinh Tồn")
-            _G.DeadRailsESP = false
-            Sec:NewToggle("ESP Người - Zombie - Vật Phẩm", "Phân biệt rõ ràng các mục tiêu", function(state)
-                _G.DeadRailsESP = state
-                task.spawn(function()
-                    while _G.DeadRailsESP do
-                        pcall(function()
-                            for _, obj in pairs(workspace:GetChildren()) do
-                                if obj:FindFirstChild("Humanoid") then
-                                    if game.Players:GetPlayerFromCharacter(obj) thenif obj.Name ~= game.Players.LocalPlayer.Name then createESP(obj, "👤 Người Chơi", Color3.fromRGB(0, 255, 255)) end
-                                    else createESP(obj, "🧟 Zombie", Color3.fromRGB(255, 0, 0)) end
-                                end
-                            end
-                            for _, obj in pairs(workspace:GetDescendants()) do
-                                if string.find(string.lower(obj.Name), "scrap") or string.find(string.lower(obj.Name), "supply") then createESP(obj, "📦 Vật Phẩm Quý", Color3.fromRGB(255, 165, 0))
-                                elseif string.find(string.lower(obj.Name), "cash") or string.find(string.lower(obj.Name), "safe") then createESP(obj, "💵 Tiền/Két Sắt", Color3.fromRGB(0, 255, 0)) end
-                            end
-                        end)
-                        task.wait(3.5)
-                    end
-                end)
-            end)
-
-        elseif currentPlaceId == 139360679647453 or string.find(string.lower(game:GetService("MarketplaceService"):GetProductInfo(currentPlaceId).Name), "lori") then
-            local Tab = Window:NewTab("👁️ ÁC MỘNG LORI")
-            local Sec = Tab:NewSection("Dữ Liệu Bản Đồ")
-            Sec:NewButton("Xóa Sương Mù (Clear Vision)", "Tối ưu tầm nhìn toàn bản đồ", function()
-                pcall(function() game:GetService("Lighting").FogEnd = 999999 game:GetService("Lighting").FogStart = 999999 end)
-            end)
+    // Thực hiện vẽ đè ESP lên màn hình game song song nếu trạng thái Checkbox được bật
+    RenderESPOverlay();
+}
