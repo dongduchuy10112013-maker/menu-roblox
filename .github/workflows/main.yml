@@ -1,187 +1,221 @@
-name: Build Roblox Executor Premium Menu
-on:
-  workflow_dispatch:
+#include "imgui.h"
+#include <vector>
+#include <string>
+#include <string.h>
 
-jobs:
-  build:
-    runs-on: macos-14
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+// ========================================================
+// 1. CẤU TRÚC DỮ LIỆU ĐỐI TƯỢNG (GAME ENGINE STRUCTURE)
+// ========================================================
+struct Vector2D {
+    float x;
+    float y;
+};
 
-      - name: Initialize Standard Apple Workspace
-        run: |
-          # Khởi tạo không gian làm việc đạt chuẩn cấu trúc của Apple để vượt qua bộ lọc bảo mật
-          mkdir -p HuyPremiumProject/src
-          
-          cat << 'EOF' > HuyPremiumProject/src/Tweak.m
-          #import <Foundation/Foundation.h>
-          #import <UIKit/UIKit.h>
-          #import <objc/runtime.h>
+struct GamePlayer {
+    int id;
+    std::string name;
+    Vector2D position;
+    float width;
+    float height;
+    bool isAlive;
+};
 
-          static NSString *const HARDCODED_KEY = @"HuyPremium2026";
-          static BOOL is_menu_activated = NO;
+// ========================================================
+// 2. KHAI BÁO CÁC BIẾN TRẠNG THÁI HỆ THỐNG (STATES)
+// ========================================================
+// Quản lý bảo mật & Menu
+static bool b_MenuOpen = true;
+static bool b_Authenticated = false;
+static char sz_KeyBuffer[64] = "";
+const char* sz_ValidKey = "ADMIN-DEV-2026"; // Mã khóa kích hoạt mẫu
 
-          void optimize_memory_management() {
-              @autoreleasepool {
-                  [[NSURLCache sharedURLCache] removeAllCachedResponses];
-                  [[NSUserDefaults standardUserDefaults] synchronize];
-              }
-          }
+// Quản lý Phân Tab Giao diện
+enum MenuTabs { TAB_OVERVIEW = 0, TAB_VISUALS, TAB_MOVEMENT };
+static int i_SelectedTab = TAB_OVERVIEW;
 
-          void safe_ui_render(void (^block)(void)) {
-              if ([NSThread isMainThread]) {
-                  block();
-              } else {
-                  dispatch_async(dispatch_get_main_queue(), block);
-              }
-          }
+// Cấu hình tính năng
+static bool b_EnableESP = false;
+static int i_TargetPlayerIndex = 0;
 
-          @interface HuyPremiumUI : NSObject
-          + (void)createAuthWindow;
-          + (void)createMainExecutorMenu;
-          @end
+// ========================================================
+// 3. DỮ LIỆU GIẢ LẬP VÀ LOGIC XỬ LÝ TRONG GAME
+// ========================================================
+// Giả định đây là đối tượng Nhân vật chính (Local Player) của bạn
+static GamePlayer localPlayer = { 1, "Chủ Phòng (Dev)", {400.0f, 500.0f}, 40.0f, 60.0f, true };
 
-          @implementation HuyPremiumUI
+// Hàm lấy danh sách tất cả người chơi khác từ Server/Engine về bộ nhớ tạm
+std::vector<GamePlayer> FetchActivePlayers() 
+{
+    std::vector<GamePlayer> plist;
+    // Thêm dữ liệu mẫu của các người chơi khác trong phòng để test
+    plist.push_back({ 101, "Người chơi 1", {250.0f, 300.0f}, 40.0f, 60.0f, true });
+    plist.push_back({ 102, "Người chơi 2", {650.0f, 450.0f}, 40.0f, 60.0f, true });
+    plist.push_back({ 103, "Người chơi 3 (Đã chết)", {0.0f, 0.0f}, 40.0f, 60.0f, false });
+    return plist;
+}
 
-          + (void)createAuthWindow {
-              safe_ui_render(^{
-                  UIWindow *keyWindow = nil;
-                  if (@available(iOS 13.0, *)) {
-                      for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                          if (scene.activationState == UISceneActivationStateForegroundActive) {
-                              for (UIWindow *window in scene.windows) {
-                                  if (window.isKeyWindow) { keyWindow = window; break; }
-                              }
-                          }
-                      }
-                  }
-                  if (!keyWindow) { keyWindow = [UIApplication sharedApplication].keyWindow; }
-                  if (!keyWindow) return;
+// Hàm thực hiện chức năng Dịch Chuyển Tức Thời an toàn (Chống văng/Kẹt vật lý)
+void ExecuteTeleport(GamePlayer& source, const GamePlayer& target) 
+{
+    // CHỐNG VĂNG: Kiểm tra xem mục tiêu có tồn tại hợp lệ và còn sống không
+    if (!target.isAlive) return;
 
-                  UIView *authView = [[UIView alloc] initWithFrame:CGRectMake(60, 80, 320, 180)];
-                  authView.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.10 alpha:0.98];
-                  authView.layer.cornerRadius = 10;
-                  authView.layer.borderWidth = 1.5;
-                  authView.layer.borderColor = [UIColor orangeColor].CGColor;
-                  authView.tag = 8888;
+    // Thay đổi tọa độ nhân vật chính tới vị trí mục tiêu
+    // Trừ đi một khoảng nhỏ ở trục Y (-10px) để nhân vật xuất hiện phía trên đầu, tránh kẹt va chạm (Collision)
+    source.position.x = target.position.x;
+    source.position.y = target.position.y - 10.0f;
+}
 
-                  UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 15, 300, 25)];
-                  titleLabel.text = @"HỆ THỐNG XÁC THỰC KEY";
-                  titleLabel.textColor = [UIColor orangeColor];
-                  titleLabel.font = [UIFont boldSystemFontOfSize:15];
-                  titleLabel.textAlignment = NSTextAlignmentCenter;[authView addSubview:titleLabel];
+// Hàm vẽ khung định vị ESP đè lên màn hình đồ họa
+void RenderESPOverlay() 
+{
+    if (!b_EnableESP) return;
 
-                  UITextField *keyInput = [[UITextField alloc] initWithFrame:CGRectMake(20, 55, 280, 35)];
-                  keyInput.backgroundColor = [UIColor colorWithRed:0.15 green:0.15 blue:0.17 alpha:1.0];
-                  keyInput.textColor = [UIColor whiteColor];
-                  keyInput.placeholder = @" Nhập mã kích hoạt tại đây...";
-                  keyInput.layer.cornerRadius = 5;
-                  keyInput.font = [UIFont systemFontOfSize:13];
-                  [authView addSubview:keyInput];
+    // Lấy danh sách vẽ lớp trên cùng của ImGui
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+    if (!drawList) return;
 
-                  UIButton *verifyBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-                  verifyBtn.frame = CGRectMake(20, 110, 280, 40);
-                  verifyBtn.backgroundColor = [UIColor orangeColor];
-                  verifyBtn.layer.cornerRadius = 5;
-                  [verifyBtn setTitle:@"KÍCH HOẠT MENU" forState:UIControlStateNormal];
-                  [verifyBtn setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
-                  verifyBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+    std::vector<GamePlayer> players = FetchActivePlayers();ImU32 colorBox = IM_COL32(0, 255, 150, 255); // Màu xanh neon định vị
 
-                  objc_setAssociatedObject(verifyBtn, "input_box_key", keyInput, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                  objc_setAssociatedObject(verifyBtn, "auth_view_key", authView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                  [verifyBtn addTarget:self action:@selector(onVerifyPressed:) forControlEvents:UIControlEventTouchUpInside];
-                  
-                  [authView addSubview:verifyBtn];
-                  [keyWindow addSubview:authView];
-              });
-          }
+    for (const auto& player : players) 
+    {
+        // TỐI ƯU/CHỐNG VĂNG: Chỉ vẽ những đối tượng hợp lệ và còn sống
+        if (!player.isAlive) continue;
 
-          + (void)onVerifyPressed:(UIButton*)sender {
-              UITextField *keyInput = objc_getAssociatedObject(sender, "input_box_key");
-              UIView *authView = objc_getAssociatedObject(sender, "auth_view_key");
-              
-              if (keyInput && [keyInput.text isEqualToString:HARDCODED_KEY]) {
-                  is_menu_activated = YES;
-                  [authView removeFromSuperview];
-                  [HuyPremiumUI createMainExecutorMenu];
-              } else {
-                  UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
-                  if (keyWindow && keyWindow.rootViewController) {
-                      UIAlertController *errorAlert = [UIAlertController alertControllerWithTitle:@"Lỗi" message:@"Mã kích hoạt không chính xác!" preferredStyle:UIAlertControllerStyleAlert];
-                      [errorAlert addAction:[UIAlertAction actionWithTitle:@"Thử lại" style:UIAlertActionStyleDefault handler:nil]];
-                      [keyWindow.rootViewController presentViewController:errorAlert animated:YES completion:nil];
-                  }
-              }
-          }
+        // Tính toán tọa độ 4 góc của khung Box từ tâm vị trí chân
+        float t_Left = player.position.x - (player.width / 2);
+        float t_Top = player.position.y - player.height;
+        float t_Right = player.position.x + (player.width / 2);
+        float t_Bottom = player.position.y;
 
-          + (void)createMainExecutorMenu {
-              if (!is_menu_activated) return;
-              
-              safe_ui_render(^{
-                  UIWindow *keyWindow = nil;if (@available(iOS 13.0, *)) {
-                      for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                          if (scene.activationState == UISceneActivationStateForegroundActive) {
-                              for (UIWindow *window in scene.windows) {
-                                  if (window.isKeyWindow) { keyWindow = window; break; }
-                              }
-                          }
-                      }
-                  }
-                  if (!keyWindow) { keyWindow = [UIApplication sharedApplication].keyWindow; }
-                  if (!keyWindow) return;
+        // Tiến hành vẽ Box ESP
+        drawList->AddRect(ImVec2(t_Left, t_Top), ImVec2(t_Right, t_Bottom), colorBox, 0.0f, 0, 1.5f);
 
-                  UIView *menuView = [[UIView alloc] initWithFrame:CGRectMake(50, 50, 360, 260)];
-                  menuView.backgroundColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.12 alpha:0.96];
-                  menuView.layer.cornerRadius = 12;
-                  menuView.layer.borderWidth = 1.5;
-                  menuView.layer.borderColor = [UIColor cyanColor].CGColor;
+        // Hiển thị Tên người chơi phía trên khung chữ nhật
+        std::string label = player.name;
+        drawList->AddText(ImVec2(t_Left, t_Top - 15), IM_COL32(255, 255, 255, 255), label.c_str());
+    }
+}
 
-                  UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 10, 340, 30)];
-                  titleLabel.text = @"HUY EXECUTOR V2 - PREMIUM VERSION";
-                  titleLabel.textColor = [UIColor cyanColor];
-                  titleLabel.font = [UIFont boldSystemFontOfSize:15];
-                  titleLabel.textAlignment = NSTextAlignmentCenter;
-                  [menuView addSubview:titleLabel];
+// ========================================================
+// 4. HÀM DỰNG GIAO DIỆN MENU CHÍNH
+// ========================================================
+void DrawEngineController() 
+{
+    if (!b_MenuOpen) return;
 
-                  UITextView *scriptBox = [[UITextView alloc] initWithFrame:CGRectMake(15, 50, 330, 140)];
-                  scriptBox.backgroundColor = [UIColor colorWithRed:0.16 green:0.16 blue:0.18 alpha:1.0];
-                  scriptBox.textColor = [UIColor whiteColor];
-                  scriptBox.font = [UIFont fontWithName:@"Courier" size:12];
-                  scriptBox.layer.cornerRadius = 6;
-                  scriptBox.text = @"-- Dan script Roblox Lua vao day\nprint('Premium Active!')";
-                  [menuView addSubview:scriptBox];
+    // Đặt kích thước cố định cho khung cửa sổ xác thực và tính năng
+    ImGui::SetNextWindowSize(ImVec2(550, 380), ImGuiCond_FirstUseEver);
 
-                  UIButton *execBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-                  execBtn.frame = CGRectMake(15, 205, 160, 40);
-                  execBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.15 alpha:1.0];
-                  execBtn.layer.cornerRadius = 6;
-                  [execBtn setTitle:@"EXECUTE" forState:UIControlStateNormal];
-                  [execBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-                  execBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
-                  [execBtn addTarget:self action:@selector(onExecutePressed:) forControlEvents:UIControlEventTouchUpInside];
-                  objc_setAssociatedObject(execBtn, "script_box_key", scriptBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                  [menuView addSubview:execBtn];
+    // MÀN HÌNH 1: YÊU CẦU XÁC THỰC MÃ KHÓA (KEY SYSTEM)
+    if (!b_Authenticated) 
+    {
+        ImGui::Begin("Hệ Thống Kích Hoạt Quyền Dev", &b_MenuOpen, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Cảnh báo: Cần nhập mã bản quyền để truy cập các tính năng kiểm thử!");
+        ImGui::Separator(); ImGui::Spacing();
 
-                  UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];closeBtn.frame = CGRectMake(185, 205, 160, 40);
-                  closeBtn.backgroundColor = [UIColor colorWithRed:0.75 green:0.15 blue:0.15 alpha:1.0];
-                  closeBtn.layer.cornerRadius = 6;
-                  [closeBtn setTitle:@"AN MENU" forState:UIControlStateNormal];
-                  [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-                  closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
-                  [closeBtn addTarget:menuView action:@selector(removeFromSuperview) forControlEvents:UIControlEventTouchUpInside];
-                  [menuView addSubview:closeBtn];
+        ImGui::Text("Mã kích hoạt (Key):");
+        ImGui::InputText("##KeyInput", sz_KeyBuffer, IM_ARRAYSIZE(sz_KeyBuffer), ImGuiInputTextFlags_Password);
+        ImGui::Spacing();
 
-                  [keyWindow addSubview:menuView];
-              });
-          }
+        if (ImGui::Button("XÁC NHẬN KÍCH HOẠT", ImVec2(-1, 35))) 
+        {
+            if (strcmp(sz_KeyBuffer, sz_ValidKey) == 0) {
+                b_Authenticated = true; // Mở khóa menu
+            } else {
+                ImGui::OpenPopup("Mã Sai");
+            }
+        }
 
-          + (void)onExecutePressed:(UIButton*)sender {
-              optimize_memory_management();
-              UITextView *scriptBox = objc_getAssociatedObject(sender, "script_box_key");
-              if (scriptBox) {
-                  const char* code = [scriptBox.text UTF8String];
-                  NSLog(@"[HuyExecutor] Executing Lua: %s", code);
-              }
-          }
-          @end
+        // Popup cảnh báo khi gõ sai key
+        if (ImGui::BeginPopupModal("Mã Sai", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Mã kích hoạt bạn nhập không chính xác. Vui lòng thử lại!");
+            if (ImGui::Button("Đóng", ImVec2(100, 0))) { ImGui::CloseCurrentPopup(); }
+            ImGui::EndPopup();
+        }
+        ImGui::End();
+        return; // Chặn không cho chạy xuống menu tính năng bên dưới
+    }
+
+    // MÀN HÌNH 2: GIAO DIỆN ĐIỀU KHIỂN CHỨC NĂNG CHÍNH (ĐÃ XÁC THỰC)
+    ImGui::Begin("Developer Control Panel v1.0", &b_MenuOpen, ImGuiWindowFlags_NoCollapse);// Chia bố cục 2 cột bằng Table của ImGui (Thay thế cho cấu hình Columns cũ giúp tối ưu luồng hiển thị)
+    if (ImGui::BeginTable("MenuLayoutTable", 2, ImGuiTableFlags_SizingFixedFit)) 
+    {
+        ImGui::TableSetupColumn("Sidebar", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+        ImGui::TableSetupColumn("Content", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableNextRow();
+
+        // ----------------------------------------------------
+        // CỘT TRÁI: DANH SÁCH TAB ĐIỀU HƯỚNG
+        // ----------------------------------------------------
+        ImGui::TableSetColumnIndex(0);
+        ImGui::Text("Chức Năng");
+        ImGui::Separator(); ImGui::Spacing();
+
+        if (ImGui::Button("Tổng Quan", ImVec2(-1, 32)))  { i_SelectedTab = TAB_OVERVIEW; } ImGui::Spacing();
+        if (ImGui::Button("Định Vị ESP", ImVec2(-1, 32))) { i_SelectedTab = TAB_VISUALS; } ImGui::Spacing();
+        if (ImGui::Button("Dịch Chuyển", ImVec2(-1, 32))) { i_SelectedTab = TAB_MOVEMENT; }
+
+        // ----------------------------------------------------
+        // CỘT PHẢI: NỘI DUNG CHI TIẾT CỦA TỪNG TAB
+        // ----------------------------------------------------
+        ImGui::TableSetColumnIndex(1);
+        
+        if (i_SelectedTab == TAB_OVERVIEW) 
+        {
+            ImGui::Text("HỆ THỐNG KIỂM THỬ AN TOÀN TRÒ CHƠI");
+            ImGui::Separator();
+            ImGui::Text("Tài khoản: %s", localPlayer.name.c_str());
+            ImGui::Text("Tọa độ hiện tại: X: %.1f | Y: %.1f", localPlayer.position.x, localPlayer.position.y);
+            ImGui::Text("Hiệu năng hiển thị: %.1f FPS", ImGui::GetIO().Framerate);
+        }
+        else if (i_SelectedTab == TAB_VISUALS) 
+        {
+            ImGui::Text("CẤU HÌNH HIỂN THỊ ĐỒ HỌA (ESP)");
+            ImGui::Separator(); ImGui::Spacing();
+            
+            // Công tắc bật/tắt chức năng vẽ khung định vị
+            ImGui::Checkbox("Kích hoạt ESP Box", &b_EnableESP);
+            ImGui::TextWrapped("Lưu ý: Tính năng này vẽ trực tiếp lên DrawList tầng cao nhất, tự động bỏ qua các thực thể không còn hoạt động để tránh hao tổn tài nguyên CPU.");
+        }
+        else if (i_SelectedTab == TAB_MOVEMENT) 
+        {
+            ImGui::Text("ĐIỀU HƯỚNG DỊCH CHUYỂN NHÂN VẬT");
+            ImGui::Separator(); ImGui::Spacing();
+
+            // Lấy danh sách người chơi mới nhất
+            std::vector<GamePlayer> currentPlayers = FetchActivePlayers();
+            
+            // Xử lý giao diện danh sách cuộn (Combo Box) để chọn người chơi cần dịch chuyển tới
+            if (ImGui::BeginCombo("Mục tiêu đến", currentPlayers[i_TargetPlayerIndex].name.c_str())) 
+            {
+                for (int n = 0; n < currentPlayers.size(); n++) 
+                {bool isSelected = (i_TargetPlayerIndex == n);
+                    std::string entryName = currentPlayers[n].name + (currentPlayers[n].isAlive ? "" : " (Chết)");
+                    
+                    if (ImGui::Selectable(entryName.c_str(), isSelected)) {
+                        i_TargetPlayerIndex = n;
+                    }
+                    if (isSelected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+            // Nút bấm thực hiện hành động dịch chuyển tức thời
+            if (ImGui::Button("DỊCH CHUYỂN ĐẾN MỤC TIÊU", ImVec2(-1, 40))) 
+            {
+                ExecuteTeleport(localPlayer, currentPlayers[i_TargetPlayerIndex]);
+            }
+        }
+
+        ImGui::EndTable();
+    }
+    ImGui::End();
+
+    // Thực hiện vẽ đè ESP lên màn hình game song song nếu trạng thái Checkbox được bật
+    RenderESPOverlay();
+}
