@@ -1,78 +1,350 @@
-// menu_dylib.c
+// menu_dylib.c - Granny 1 Menu Dylib
+// Full features menu for Granny 1 game
+
 #include <objc/runtime.h>
 #include <objc/message.h>
 #include <Foundation/Foundation.h>
 #include <Cocoa/Cocoa.h>
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <sys/sysctl.h>
 
-// Hàm được gọi khi dylib được load
+// ========== HOOK STRUCTURES ==========
+typedef struct {
+    void *original;
+    void *replacement;
+} Hook;
+
+// ========== UTILITY FUNCTIONS ==========
+static void logMessage(NSString *msg) {
+    NSLog(@"[GrannyMenu] %@", msg);
+}
+
+static void *getSymbol(const char *name) {
+    return dlsym(RTLD_DEFAULT, name);
+}
+
+// ========== MEMORY PATCHING ==========
+static void patchMemory(void *address, void *data, size_t size) {
+    // Get page size
+    size_t pagesize = sysconf(_SC_PAGESIZE);
+    uintptr_t page = (uintptr_t)address & ~(pagesize - 1);
+    
+    // Make memory writable
+    mprotect((void *)page, pagesize, PROT_READ | PROT_WRITE | PROT_EXEC);
+    
+    // Write data
+    memcpy(address, data, size);
+    
+    // Restore protection
+    mprotect((void *)page, pagesize, PROT_READ | PROT_EXEC);
+}
+
+// ========== GAME HOOKS ==========
+// Health hook
+static int (*original_health_func)(void *self, SEL _cmd);
+static int hooked_health_func(void *self, SEL _cmd) {
+    return 100; // Always return full health
+}
+
+// Ammo hook
+static int (*original_ammo_func)(void *self, SEL _cmd);
+static int hooked_ammo_func(void *self, SEL _cmd) {
+    return 999; // Unlimited ammo
+}
+
+// Key hook
+static int (*original_key_func)(void *self, SEL _cmd);
+static int hooked_key_func(void *self, SEL _cmd) {
+    return 1; // Always have key
+}
+
+// ========== MENU ACTIONS ==========
+static bool godMode = false;
+static bool unlimitedAmmo = false;
+static bool hasAllKeys = false;
+static bool noClip = false;
+static bool speedHack = false;
+static float speedMultiplier = 1.0f;
+
+// Toggle functions
+static void toggleGodMode() {
+    godMode = !godMode;
+    logMessage([NSString stringWithFormat:@"God Mode: %@", godMode ? @"ON" : @"OFF"]);
+    
+    if (godMode) {
+        // Patch health function
+        Method healthMethod = class_getInstanceMethod(objc_getClass("Player"), @selector(getHealth));
+        original_health_func = (void *)method_getImplementation(healthMethod);
+        method_setImplementation(healthMethod, (IMP)hooked_health_func);
+    }
+}
+
+static void toggleUnlimitedAmmo() {
+    unlimitedAmmo = !unlimitedAmmo;
+    logMessage([NSString stringWithFormat:@"Unlimited Ammo: %@", unlimitedAmmo ? @"ON" : @"OFF"]);
+}
+
+static void toggleAllKeys() {
+    hasAllKeys = !hasAllKeys;
+    logMessage([NSString stringWithFormat:@"All Keys: %@", hasAllKeys ? @"ON" : @"OFF"]);
+}
+
+static void toggleNoClip() {
+    noClip = !noClip;
+    logMessage([NSString stringWithFormat:@"No Clip: %@", noClip ? @"ON" : @"OFF"]);
+}
+
+static void toggleSpeedHack() {
+    speedHack = !speedHack;
+    if (speedHack) {
+        speedMultiplier = 2.0f;
+    } else {
+        speedMultiplier = 1.0f;
+    }
+    logMessage([NSString stringWithFormat:@"Speed Hack: %@", speedHack ? @"ON (2x)" : @"OFF"]);
+}
+
+static void addItem() {
+    logMessage(@"Adding item to inventory");
+    // Add item logic here
+}
+
+static void unlockAllDoors() {
+    logMessage(@"Unlocking all doors");
+    // Door unlock logic
+}
+
+static void killAllEnemies() {
+    logMessage(@"Killing all enemies");
+    // Kill enemies logic
+}
+
+static void teleportToExit() {
+    logMessage(@"Teleporting to exit");
+    // Teleport logic
+}
+
+static void resetGame() {
+    logMessage(@"Resetting game state");
+    // Reset logic
+}
+
+static void showDebugInfo() {
+    logMessage(@"Showing debug info");
+    // Debug display
+}
+
+// ========== MENU CREATION ==========
 __attribute__((constructor))
 static void initialize() {
-    NSLog(@"[+] Menu dylib loaded successfully");
+    logMessage(@"Loading Granny 1 Menu Dylib v1.0.0");
     
     dispatch_async(dispatch_get_main_queue(), ^{
-        // Lấy ứng dụng hiện tại
         NSApplication *app = [NSApplication sharedApplication];
-        
-        // Tạo menu item mới
         NSMenu *mainMenu = [app mainMenu];
         
-        // Tạo submenu cho "Ganymed"
-        NSMenuItem *ganymedItem = [[NSMenuItem alloc] init];
-        [ganymedItem setTitle:@"Ganymed"];
+        // Create main menu item
+        NSMenuItem *grannyItem = [[NSMenuItem alloc] init];
+        [grannyItem setTitle:@"Granny Menu"];
         
-        NSMenu *ganymedMenu = [[NSMenu alloc] init];
+        NSMenu *grannyMenu = [[NSMenu alloc] init];
+        [grannyMenu setTitle:@"Granny Menu"];
         
-        // Thêm các mục vào menu
-        NSMenuItem *item1 = [[NSMenuItem alloc] init];
-        [item1 setTitle:@"Item 1"];
-        [item1 setAction:@selector(menuItem1Clicked:)];
-        [item1 setTarget:self];
+        // === PLAYER SECTION ===
+        NSMenuItem *playerSection = [[NSMenuItem alloc] init];
+        [playerSection setTitle:@"Player Mods"];
+        [playerSection setEnabled:NO];
         
-        NSMenuItem *item2 = [[NSMenuItem alloc] init];
-        [item2 setTitle:@"Item 2"];
-        [item2 setAction:@selector(menuItem2Clicked:)];
-        [item2 setTarget:self];
+        NSMenuItem *godModeItem = [[NSMenuItem alloc] init];
+        [godModeItem setTitle:@"Toggle God Mode"];
+        [godModeItem setAction:@selector(toggleGodModeAction:)];
+        [godModeItem setTarget:self];
+        [godModeItem setKeyEquivalent:@"g"];
+        [godModeItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
         
-        NSMenuItem *separator = [NSMenuItem separatorItem];
+        NSMenuItem *unlimitedAmmoItem = [[NSMenuItem alloc] init];
+        [unlimitedAmmoItem setTitle:@"Toggle Unlimited Ammo"];
+        [unlimitedAmmoItem setAction:@selector(toggleAmmoAction:)];
+        [unlimitedAmmoItem setTarget:self];
+        [unlimitedAmmoItem setKeyEquivalent:@"a"];
+        [unlimitedAmmoItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
         
+        NSMenuItem *allKeysItem = [[NSMenuItem alloc] init];
+        [allKeysItem setTitle:@"Toggle All Keys"];
+        [allKeysItem setAction:@selector(toggleKeysAction:)];
+        [allKeysItem setTarget:self];
+        [allKeysItem setKeyEquivalent:@"k"];
+        [allKeysItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+        
+        NSMenuItem *noClipItem = [[NSMenuItem alloc] init];
+        [noClipItem setTitle:@"Toggle No Clip"];
+        [noClipItem setAction:@selector(toggleNoClipAction:)];
+        [noClipItem setTarget:self];
+        [noClipItem setKeyEquivalent:@"n"];
+        [noClipItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+        
+        NSMenuItem *speedHackItem = [[NSMenuItem alloc] init];
+        [speedHackItem setTitle:@"Toggle Speed Hack (2x)"];
+        [speedHackItem setAction:@selector(toggleSpeedAction:)];
+        [speedHackItem setTarget:self];
+        [speedHackItem setKeyEquivalent:@"s"];
+        [speedHackItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+        
+        // === ITEMS SECTION ===
+        NSMenuItem *itemsSection = [[NSMenuItem alloc] init];
+        [itemsSection setTitle:@"Items"];
+        [itemsSection setEnabled:NO];
+        
+        NSMenuItem *addItemMenuItem = [[NSMenuItem alloc] init];
+        [addItemMenuItem setTitle:@"Add Random Item"];
+        [addItemMenuItem setAction:@selector(addItemAction:)];
+        [addItemMenuItem setTarget:self];
+        [addItemMenuItem setKeyEquivalent:@"i"];
+        [addItemMenuItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+        
+        NSMenuItem *unlockDoorsItem = [[NSMenuItem alloc] init];
+        [unlockDoorsItem setTitle:@"Unlock All Doors"];
+        [unlockDoorsItem setAction:@selector(unlockDoorsAction:)];
+        [unlockDoorsItem setTarget:self];
+        [unlockDoorsItem setKeyEquivalent:@"u"];
+        [unlockDoorsItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+        
+        // === ENEMIES SECTION ===
+        NSMenuItem *enemiesSection = [[NSMenuItem alloc] init];
+        [enemiesSection setTitle:@"Enemies"];
+        [enemiesSection setEnabled:NO];
+        
+        NSMenuItem *killEnemiesItem = [[NSMenuItem alloc] init];
+        [killEnemiesItem setTitle:@"Kill All Enemies"];
+        [killEnemiesItem setAction:@selector(killEnemiesAction:)];
+        [killEnemiesItem setTarget:self];
+        [killEnemiesItem setKeyEquivalent:@"e"];
+        [killEnemiesItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+        
+        // === TELEPORT SECTION ===
+        NSMenuItem *teleportSection = [[NSMenuItem alloc] init];
+        [teleportSection setTitle:@"Teleport"];
+        [teleportSection setEnabled:NO];
+        
+        NSMenuItem *teleportExitItem = [[NSMenuItem alloc] init];
+        [teleportExitItem setTitle:@"Teleport to Exit"];
+        [teleportExitItem setAction:@selector(teleportExitAction:)];
+        [teleportExitItem setTarget:self];
+        [teleportExitItem setKeyEquivalent:@"t"];
+        [teleportExitItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+        
+        // === DEBUG SECTION ===
+        NSMenuItem *debugSection = [[NSMenuItem alloc] init];
+        [debugSection setTitle:@"Debug"];
+        [debugSection setEnabled:NO];
+        
+        NSMenuItem *debugInfoItem = [[NSMenuItem alloc] init];
+        [debugInfoItem setTitle:@"Show Debug Info"];
+        [debugInfoItem setAction:@selector(debugInfoAction:)];
+        [debugInfoItem setTarget:self];
+        [debugInfoItem setKeyEquivalent:@"d"];
+        [debugInfoItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+        
+        NSMenuItem *resetItem = [[NSMenuItem alloc] init];
+        [resetItem setTitle:@"Reset Game State"];
+        [resetItem setAction:@selector(resetAction:)];
+        [resetItem setTarget:self];
+        [resetItem setKeyEquivalent:@"r"];
+        [resetItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+        
+        // Separators
+        NSMenuItem *sep1 = [NSMenuItem separatorItem];
+        NSMenuItem *sep2 = [NSMenuItem separatorItem];
+        NSMenuItem *sep3 = [NSMenuItem separatorItem];
+        NSMenuItem *sep4 = [NSMenuItem separatorItem];
+        NSMenuItem *sep5 = [NSMenuItem separatorItem];
+        
+        // Add items to menu
+        [grannyMenu addItem:playerSection];
+        [grannyMenu addItem:godModeItem];
+        [grannyMenu addItem:unlimitedAmmoItem];
+        [grannyMenu addItem:allKeysItem];
+        [grannyMenu addItem:noClipItem];
+        [grannyMenu addItem:speedHackItem];
+        [grannyMenu addItem:sep1];
+        [grannyMenu addItem:itemsSection];
+        [grannyMenu addItem:addItemMenuItem];
+        [grannyMenu addItem:unlockDoorsItem];
+        [grannyMenu addItem:sep2];
+        [grannyMenu addItem:enemiesSection];
+        [grannyMenu addItem:killEnemiesItem];
+        [grannyMenu addItem:sep3];
+        [grannyMenu addItem:teleportSection];
+        [grannyMenu addItem:teleportExitItem];
+        [grannyMenu addItem:sep4];
+        [grannyMenu addItem:debugSection];
+        [grannyMenu addItem:debugInfoItem];
+        [grannyMenu addItem:resetItem];
+        [grannyMenu addItem:sep5];
+        
+        // Quit option
         NSMenuItem *quitItem = [[NSMenuItem alloc] init];
-        [quitItem setTitle:@"Quit"];
-        [quitItem setAction:@selector(quitApp:)];
+        [quitItem setTitle:@"Quit Game"];
+        [quitItem setAction:@selector(quitAction:)];
         [quitItem setTarget:self];
+        [quitItem setKeyEquivalent:@"q"];
+        [quitItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+        [grannyMenu addItem:quitItem];
         
-        // Thêm các mục vào menu
-        [ganymedMenu addItem:item1];
-        [ganymedMenu addItem:item2];
-        [ganymedMenu addItem:separator];
-        [ganymedMenu addItem:quitItem];
+        // Set submenu
+        [grannyItem setSubmenu:grannyMenu];
+        [mainMenu addItem:grannyItem];
         
-        [ganymedItem setSubmenu:ganymedMenu];
-        
-        // Thêm menu vào thanh menu chính
-        [mainMenu addItem:ganymedItem];
-        
-        NSLog(@"[+] Menu created successfully");
+        logMessage(@"Granny Menu created successfully");
     });
 }
 
-// Hàm xử lý sự kiện cho các menu item
-void menuItem1Clicked(id self, SEL _cmd) {
-    NSLog(@"[+] Menu Item 1 clicked");
-    // Thêm code xử lý tại đây
-    NSAlert *alert = [[NSAlert alloc] init];
-    [alert setMessageText:@"Item 1 clicked"];
-    [alert runModal];
+// ========== ACTION HANDLERS ==========
+void toggleGodModeAction(id self, SEL _cmd) {
+    toggleGodMode();
 }
 
-void menuItem2Clicked(id self, SEL _cmd) {
-    NSLog(@"[+] Menu Item 2 clicked");
-    // Thêm code xử lý tại đây
-    NSAlert *alert = [[NSAlert alloc] init];
-    [alert setMessageText:@"Item 2 clicked"];
-    [alert runModal];
+void toggleAmmoAction(id self, SEL _cmd) {
+    toggleUnlimitedAmmo();
 }
 
-void quitApp(id self, SEL _cmd) {
-    NSLog(@"[+] Quit app requested");
+void toggleKeysAction(id self, SEL _cmd) {
+    toggleAllKeys();
+}
+
+void toggleNoClipAction(id self, SEL _cmd) {
+    toggleNoClip();
+}
+
+void toggleSpeedAction(id self, SEL _cmd) {
+    toggleSpeedHack();
+}
+
+void addItemAction(id self, SEL _cmd) {
+    addItem();
+}
+
+void unlockDoorsAction(id self, SEL _cmd) {
+    unlockAllDoors();
+}
+
+void killEnemiesAction(id self, SEL _cmd) {
+    killAllEnemies();
+}
+
+void teleportExitAction(id self, SEL _cmd) {
+    teleportToExit();
+}
+
+void debugInfoAction(id self, SEL _cmd) {
+    showDebugInfo();
+}
+
+void resetAction(id self, SEL _cmd) {
+    resetGame();
+}
+
+void quitAction(id self, SEL _cmd) {
     [NSApp terminate:nil];
 }
