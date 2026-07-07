@@ -1,0 +1,78 @@
+// menu_dylib.c
+#include <objc/runtime.h>
+#include <objc/message.h>
+#include <Foundation/Foundation.h>
+#include <Cocoa/Cocoa.h>
+
+// Hàm được gọi khi dylib được load
+__attribute__((constructor))
+static void initialize() {
+    NSLog(@"[+] Menu dylib loaded successfully");
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Lấy ứng dụng hiện tại
+        NSApplication *app = [NSApplication sharedApplication];
+        
+        // Tạo menu item mới
+        NSMenu *mainMenu = [app mainMenu];
+        
+        // Tạo submenu cho "Ganymed"
+        NSMenuItem *ganymedItem = [[NSMenuItem alloc] init];
+        [ganymedItem setTitle:@"Ganymed"];
+        
+        NSMenu *ganymedMenu = [[NSMenu alloc] init];
+        
+        // Thêm các mục vào menu
+        NSMenuItem *item1 = [[NSMenuItem alloc] init];
+        [item1 setTitle:@"Item 1"];
+        [item1 setAction:@selector(menuItem1Clicked:)];
+        [item1 setTarget:self];
+        
+        NSMenuItem *item2 = [[NSMenuItem alloc] init];
+        [item2 setTitle:@"Item 2"];
+        [item2 setAction:@selector(menuItem2Clicked:)];
+        [item2 setTarget:self];
+        
+        NSMenuItem *separator = [NSMenuItem separatorItem];
+        
+        NSMenuItem *quitItem = [[NSMenuItem alloc] init];
+        [quitItem setTitle:@"Quit"];
+        [quitItem setAction:@selector(quitApp:)];
+        [quitItem setTarget:self];
+        
+        // Thêm các mục vào menu
+        [ganymedMenu addItem:item1];
+        [ganymedMenu addItem:item2];
+        [ganymedMenu addItem:separator];
+        [ganymedMenu addItem:quitItem];
+        
+        [ganymedItem setSubmenu:ganymedMenu];
+        
+        // Thêm menu vào thanh menu chính
+        [mainMenu addItem:ganymedItem];
+        
+        NSLog(@"[+] Menu created successfully");
+    });
+}
+
+// Hàm xử lý sự kiện cho các menu item
+void menuItem1Clicked(id self, SEL _cmd) {
+    NSLog(@"[+] Menu Item 1 clicked");
+    // Thêm code xử lý tại đây
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setMessageText:@"Item 1 clicked"];
+    [alert runModal];
+}
+
+void menuItem2Clicked(id self, SEL _cmd) {
+    NSLog(@"[+] Menu Item 2 clicked");
+    // Thêm code xử lý tại đây
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setMessageText:@"Item 2 clicked"];
+    [alert runModal];
+}
+
+void quitApp(id self, SEL _cmd) {
+    NSLog(@"[+] Quit app requested");
+    [NSApp terminate:nil];
+}
